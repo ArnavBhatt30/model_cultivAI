@@ -1,29 +1,8 @@
-# app.py
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from PIL import Image
+import gradio as gr
 import torch
 import torchvision.transforms as transforms
 from torchvision import models
-import io
-
-# --- Initialize app ---
-app = FastAPI(
-    title="Plant Disease Classifier",
-    description="Upload an image and get plant disease prediction",
-    version="1.0"
-)
-
-# Allow CORS (optional, useful if connecting from frontend)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from PIL import Image
 
 # --- Define class names ---
 classes = [
@@ -53,7 +32,7 @@ model = models.resnet50(weights=None)
 model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
 
 # Load your trained checkpoint
-checkpoint_path = "resnet50_final.pth"  # <- update with your actual model filename
+checkpoint_path = "resnet50_final.pth"
 state_dict = torch.load(checkpoint_path, map_location=device)
 # Handle DataParallel if needed
 new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
@@ -76,27 +55,59 @@ transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225])
 ])
 
-# --- API routes ---
-@app.get("/")
-def home():
-    return {"message": "Plant Disease Classification API. Go to /docs for Swagger UI"}
-
-@app.post("/predict/")
-async def predict(file: UploadFile = File(...)):
+# --- Prediction function ---
+def predict(image):
+    """
+    Predict plant disease from image
+    Args:
+        image: PIL Image
+    Returns:
+        dict: Dictionary with class names and probabilities
+    """
+    if image is None:
+        return None
+    
     try:
-        image = Image.open(io.BytesIO(await file.read())).convert("RGB")
+        # Convert to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Preprocess image
+        img_tensor = transform(image).unsqueeze(0).to(device)
+        
+        # Make prediction
+        with torch.no_grad():
+            outputs = model(img_tensor)
+            probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+        
+        # Get top 5 predictions
+        top5_prob, top5_idx = torch.topk(probabilities, 5)
+        
+        # Create results dictionary
+        results = {classes[idx]: float(prob) for idx, prob in zip(top5_idx, top5_prob)}
+        
+        return results
+    
     except Exception as e:
-        return JSONResponse(content={"error": f"Cannot open image: {e}"}, status_code=400)
+        return {"error": str(e)}
 
-    img_tensor = transform(image).unsqueeze(0).to(device)  # add batch dim
+# --- Gradio Interface ---
+demo = gr.Interface(
+    fn=predict,
+    inputs=gr.Image(type="pil", label="Upload Plant Leaf Image"),
+    outputs=gr.Label(num_top_classes=5, label="Disease Predictions"),
+    title="🌿 Plant Disease Classifier",
+    description="""
+    ### Upload an image of a plant leaf to detect diseases
+    
+    **Supported plants:** Apple, Blueberry, Cherry, Corn, Grape, Orange, Peach, Pepper, Potato, Raspberry, Soybean, Squash, Strawberry, Tomato
+    
+    **Model:** ResNet50 trained on PlantVillage dataset (38 classes)
+    """,
+    theme=gr.themes.Soft(),
+    allow_flagging="never"
+)
 
-    with torch.no_grad():
-        outputs = model(img_tensor)
-        _, predicted = torch.max(outputs, 1)
-        class_name = classes[predicted.item()]
-
-    return {"filename": file.filename, "prediction": class_name}
-
-# --- Optional: Serve static files (if needed for frontend) ---
-# app.mount("/static", StaticFiles(directory="static"), name="static")
+if __name__ == "__main__":
+    demo.launch()
 
